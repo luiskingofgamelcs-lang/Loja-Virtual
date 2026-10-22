@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "../lib/api.js";
+import { api, apiError } from "../lib/api.js";
 
 const basePath = import.meta.env.BASE_URL;
 
@@ -12,13 +12,19 @@ export default function CompanyRegistration() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(form).entries());
+    const cnpj = String(data.cnpj || "").replace(/\D/g, "");
+    if (cnpj.length !== 14 || /^(\d)\1+$/.test(cnpj)) {
+      setError("Informe um CNPJ válido com 14 dígitos.");
+      return;
+    }
+
     setLoading(true);
     setError("");
     try {
       const { data: created } = await api.post(
         "/platform/companies",
         {
-          cnpj: data.cnpj,
+          cnpj,
           email: data.email,
           password: data.password,
         },
@@ -27,7 +33,14 @@ export default function CompanyRegistration() {
       setCompany(created);
       form.reset();
     } catch (failure) {
-      setError(failure.response?.data?.detail || "Não foi possível cadastrar a empresa. Tente novamente.");
+      const status = failure.response?.status;
+      if (status === 503) {
+        setError("O cadastro ainda não está configurado no servidor. Confira o código mestre e tente novamente.");
+      } else if (!failure.response) {
+        setError("Não foi possível conectar à API. Aguarde o serviço iniciar e tente novamente.");
+      } else {
+        setError(apiError(failure.response.data?.detail));
+      }
     } finally {
       setLoading(false);
     }
