@@ -50,10 +50,11 @@ O workflow `.github/workflows/pages.yml` compila e publica o frontend no GitHub 
 
 Antes da publicação:
 
-1. Hospede a API FastAPI e o MongoDB em um serviço externo; GitHub Pages hospeda somente arquivos estáticos.
-2. Em **Settings → Secrets and variables → Actions → Variables**, crie `VITE_BACKEND_URL` com a URL pública da API, incluindo `/api` (por exemplo, `https://api.seudominio.com/api`).
-3. No ambiente da API, configure `CORS_ORIGINS` com a origem do site Pages (por exemplo, `https://seu-usuario.github.io`, sem o caminho do repositório), `COOKIE_SECURE=true` e `PLATFORM_SETUP_SECRET`.
-4. Cadastre cada empresa em `/cadastro`. O CNPJ informado cria/seleciona seu banco. Compartilhe com o administrador o CNPJ, e-mail e senha inicial que você definiu.
-5. O link público da vitrine deve incluir o CNPJ da empresa: `https://seu-usuario.github.io/seu-repositorio/?cnpj=12345678000199`. O login também solicita CNPJ e encaminha as chamadas ao banco correspondente.
+1. Envie a branch `main` para o GitHub. Em **Settings → Pages**, selecione **GitHub Actions** como fonte.
+2. O workflow publica o frontend mesmo sem API configurada. Sem backend, o site visual abre, mas produtos, login, cadastro, pedidos e imagens servidas pelo servidor não funcionarão.
+3. Para habilitar a loja completa, hospede a API FastAPI e o MongoDB em um serviço externo; configure a variável `VITE_BACKEND_URL` em **Settings → Secrets and variables → Actions → Variables** com a URL da API terminada em `/api` (por exemplo, `https://api.seudominio.com/api`).
+4. No ambiente da API, configure `CORS_ORIGINS` com a origem do site Pages (por exemplo, `https://seu-usuario.github.io`, sem o caminho do repositório), `COOKIE_SECURE=true` e `PLATFORM_SETUP_SECRET`.
+5. Cadastre cada empresa em `/cadastro`. O CNPJ informado cria/seleciona seu banco. Compartilhe com o administrador o CNPJ, e-mail e senha inicial definidos.
+6. O link público da vitrine deve incluir o CNPJ da empresa: `https://seu-usuario.github.io/seu-repositorio/?cnpj=12345678000199`. O login também solicita CNPJ e encaminha as chamadas ao banco correspondente.
 
-O workflow interrompe o build com uma mensagem explícita enquanto `VITE_BACKEND_URL` não estiver configurada. As imagens enviadas pelo painel são armazenadas no GridFS do MongoDB da empresa e servidas pela API em `/api/media`. URLs externas existentes continuam aceitas. O segredo de cadastro, os hashes/senhas de administradores, o segredo JWT e as credenciais do MongoDB devem ficar somente no ambiente do servidor da API, nunca em variáveis `VITE_*` ou no repositório.
+Se `VITE_BACKEND_URL` não estiver configurada, o workflow emite um aviso e publica somente o frontend estático. As imagens enviadas pelo painel são armazenadas no GridFS do MongoDB da empresa e servidas pela API em `/api/media`. URLs externas existentes continuam aceitas. O segredo de cadastro, os hashes/senhas de administradores, o segredo JWT e as credenciais do MongoDB devem ficar somente no ambiente do servidor da API, nunca em variáveis `VITE_*` ou no repositório.

@@ -50,8 +50,7 @@ jobs:
           VITE_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
         run: |
           if [ -z "$VITE_BACKEND_URL" ]; then
-            echo "::error::Configure the VITE_BACKEND_URL repository variable with the public API URL ending in /api."
-            exit 1
+            echo "::warning::VITE_BACKEND_URL is not set. The static frontend will deploy, but API-dependent store features will not work until the API is hosted and configured."
           fi
           npm run build
           cp dist/index.html dist/404.html
