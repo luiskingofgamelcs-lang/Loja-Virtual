@@ -19,12 +19,8 @@ export default function CompanyRegistration() {
         "/platform/companies",
         {
           cnpj: data.cnpj,
-          store_name: data.store_name,
-          legal_name: data.legal_name,
           email: data.email,
           password: data.password,
-          phone: data.phone,
-          business_address: data.business_address,
         },
         { headers: { "X-Setup-Secret": data.setup_secret } },
       );
@@ -48,15 +44,11 @@ export default function CompanyRegistration() {
           <>
             <p className="eyebrow">ACESSO DO PROPRIETÁRIO</p>
             <h1>Cadastrar empresa</h1>
-            <p>Cadastre a empresa e crie a conta do administrador. O CNPJ identificará o banco de dados da loja.</p>
+            <p>Informe o CNPJ e crie o acesso do administrador. Depois, configure os dados da loja no painel.</p>
             <label>Código mestre<input name="setup_secret" type="password" required autoComplete="off" /></label>
-            <label>Nome da loja<input name="store_name" required minLength="2" maxLength="160" /></label>
-            <label>Razão social<input name="legal_name" maxLength="200" /></label>
             <label>CNPJ<input name="cnpj" inputMode="numeric" placeholder="00.000.000/0000-00" required /></label>
             <label>E-mail do administrador<input name="email" type="email" required autoComplete="off" /></label>
             <label>Senha inicial (mínimo 8 caracteres)<input name="password" type="password" required minLength="8" autoComplete="new-password" /></label>
-            <label>WhatsApp da loja<input name="phone" type="tel" /></label>
-            <label>Endereço comercial<input name="business_address" /></label>
             {error && <p className="form-error">{error}</p>}
             <button className="button primary full" disabled={loading}>
               {loading ? "Cadastrando empresa..." : "Cadastrar empresa e administrador"}
