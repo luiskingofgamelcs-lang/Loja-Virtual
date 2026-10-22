@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: vitrine-virtual-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: MONGO_URL
+        sync: false
+      - key: DB_NAME
+        value: vitrine_virtual
+      - key: JWT_SECRET
+        generateValue: true
+      - key: PLATFORM_SETUP_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: https://luiskingofgamelcs-lang.github.io
+      - key: COOKIE_SECURE
+        value: "true"

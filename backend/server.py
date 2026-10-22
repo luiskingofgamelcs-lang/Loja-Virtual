@@ -248,9 +248,15 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Vitrine Virtual API", lifespan=lifespan)
 
 
+@app.get("/health")
+async def health_check() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.middleware("http")
 async def select_tenant(request: Request, call_next):
-    if request.method == "OPTIONS" or request.url.path == "/api/platform/companies":
+    public_paths = {"/health", "/api/platform/companies"}
+    if request.method == "OPTIONS" or request.url.path in public_paths:
         return await call_next(request)
 
     requested_cnpj = (
