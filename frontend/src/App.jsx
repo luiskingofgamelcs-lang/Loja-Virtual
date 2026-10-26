@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { QRCodeSVG } from "qrcode.react";
-import { toast } from "sonner";
 import { api, getTenantCnpj, mediaUrl, uploadImage } from "./lib/api.js";
 import { useAuth } from "./context/AuthContext.jsx";
 import { useCart } from "./context/CartContext.jsx";
@@ -97,7 +95,7 @@ function Storefront() {
       `Cliente: ${customer.name} | ${customer.phone}`,
       `Endereço: ${customer.address}, ${customer.neighborhood} - ${customer.city}`,
       detail,
-      `Pagamento: PIX pendente`,
+      "Pagamento: na entrega",
       `Total: ${formatBRL(currentOrder.total)}`,
     ].join("\n");
     return `https://wa.me/${(settings.phone || "").replace(/\D/g, "")}?text=${encodeURIComponent(text)}`;
@@ -213,6 +211,7 @@ function Storefront() {
             <label className="span-2">Endereço<input data-testid="checkout-input-address" name="address" required /></label>
             <label>Bairro<input name="neighborhood" /></label><label>Cidade<input name="city" /></label>
             <label className="span-2">Observações<textarea name="notes" rows="2" /></label>
+            <div className="notice span-2">O pagamento será feito na entrega.</div>
             <div className="span-2 checkout-total"><span>Total do pedido</span><strong>{formatBRL(total)}</strong></div>
             {message && <p className="form-error span-2">{message}</p>}
             <button className="button primary full span-2" data-testid="checkout-submit-button" disabled={busy}>{busy ? "Registrando pedido..." : "Confirmar pedido"}</button>
@@ -221,21 +220,12 @@ function Storefront() {
       </div>}
 
       {order && <div className="overlay">
-        <section className="dialog pix-dialog" role="dialog" aria-modal="true">
+        <section className="dialog order-dialog" role="dialog" aria-modal="true">
           <button className="close" onClick={() => setOrder(null)} aria-label="Fechar">×</button>
           <div className="success-mark">✓</div><p className="eyebrow">PEDIDO REGISTRADO</p><h2>Obrigado, {order.customer.name.split(" ")[0]}!</h2>
           <p className="dialog-lead">Pedido #{order.id.slice(0, 8)} · {formatBRL(order.total)}</p>
-          {order.pix_payload ? <><div className="qr-frame" data-testid="pix-modal-qrcode"><QRCodeSVG value={order.pix_payload} size={190} level="M" /></div><p className="pix-instruction">Escaneie o QR Code ou copie o código PIX abaixo.</p>
-            <div className="pix-copy-field"><input readOnly value={order.pix_payload} aria-label="Código PIX copia e cola" /><button data-testid="pix-copy-button" onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(order.pix_payload);
-                toast.success("Código PIX copiado!");
-              } catch {
-                toast.error("Não foi possível copiar. Selecione e copie o código manualmente.");
-              }
-            }}>Copiar</button></div>
-          </> : <div className="notice">PIX ainda não configurado. Entre em contato com a loja para combinar o pagamento.</div>}
-          <a className="button whatsapp full" data-testid="pix-whatsapp-button" href={whatsappUrl(order)} target="_blank" rel="noreferrer">Enviar resumo pelo WhatsApp</a>
+          <p className="dialog-lead">O pagamento será feito na entrega, diretamente ao entregador.</p>
+          <a className="button whatsapp full" data-testid="order-whatsapp-button" href={whatsappUrl(order)} target="_blank" rel="noreferrer">Enviar resumo pelo WhatsApp</a>
         </section>
       </div>}
     </main>
@@ -305,6 +295,10 @@ function Admin() {
     try { await api.patch(`/admin/orders/${orderId}`, { status }); await loadAdminData(); }
     catch (failure) { setError(errorText(failure)); }
   };
+  const updatePaymentStatus = async (orderId, payment_status) => {
+    try { await api.patch(`/admin/orders/${orderId}`, { payment_status }); await loadAdminData(); }
+    catch (failure) { setError(errorText(failure)); }
+  };
   const saveCustomer = async (event) => {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
@@ -372,7 +366,7 @@ function Admin() {
       `Cliente: ${customer.name || ""} | ${customer.phone || ""}`,
       `Endereço: ${[customer.address, customer.neighborhood || customer.district, customer.city, customer.postal_code || customer.cep].filter(Boolean).join(", ")}`,
       lines,
-      `Pagamento: ${order.status}`,
+      `Pagamento: ${order.payment_status === "Pago na entrega" ? "Pago na entrega" : "A receber na entrega"}`,
       `Total: ${formatBRL(order.total)}`,
     ].join("\n");
     const phone = (settings.phone || "").replace(/\D/g, "");
@@ -499,9 +493,9 @@ function Admin() {
           </section></div>}
         </>}
         {tab === "orders" && <><div className="admin-heading"><div><p className="eyebrow">VENDAS</p><h1>Pedidos & romaneio</h1><p>Acompanhe os pedidos e organize as entregas.</p></div></div>
-          <div className="table-wrap"><table><thead><tr><th>Pedido</th><th>Cliente</th><th>Data</th><th>Total</th><th>Status</th><th>Ações</th></tr></thead><tbody>
-            {orders.map((item) => <tr data-testid={`admin-order-row-${item.id}`} key={item.id}><td>#{item.id.slice(0, 8)}<small>{item.items.length} itens</small></td><td><strong>{item.customer.name}</strong><small>{item.customer.phone}</small></td><td>{new Date(item.created_at).toLocaleDateString("pt-BR")}</td><td>{formatBRL(item.total)}</td><td><select className="status-select" aria-label={`Status do pedido ${item.id}`} value={item.status} disabled={item.status === "Cancelado"} onChange={(event) => updateStatus(item.id, event.target.value)}>{["Pendente PIX", "Confirmado", "Em Separação", "Entregue", ...(item.status === "Cancelado" ? ["Cancelado"] : [])].map((status) => <option key={status}>{status}</option>)}</select></td><td className="table-actions"><a className="table-link" href={`${siteUrl("admin")}?print=${item.id}`} target="_blank" rel="noreferrer">Romaneio ↗</a>{item.status !== "Cancelado" && <><a className="table-link" href={orderWhatsAppUrl(item) || undefined} target="_blank" rel="noreferrer" aria-disabled={!settings.phone} onClick={(event) => { if (!settings.phone) { event.preventDefault(); setError("Configure o WhatsApp da empresa nas configurações."); } }}>WhatsApp ↗</a><button onClick={() => cancelOrder(item)}>Cancelar</button></>}</td></tr>)}
-            {!orders.length && <tr><td colSpan="6" className="table-empty">Nenhum pedido recebido.</td></tr>}
+          <div className="table-wrap"><table><thead><tr><th>Pedido</th><th>Cliente</th><th>Data</th><th>Total</th><th>Status</th><th>Pagamento</th><th>Ações</th></tr></thead><tbody>
+            {orders.map((item) => <tr data-testid={`admin-order-row-${item.id}`} key={item.id}><td>#{item.id.slice(0, 8)}<small>{item.items.length} itens</small></td><td><strong>{item.customer.name}</strong><small>{item.customer.phone}</small></td><td>{new Date(item.created_at).toLocaleDateString("pt-BR")}</td><td>{formatBRL(item.total)}</td><td><select className="status-select" aria-label={`Status do pedido ${item.id}`} value={item.status} disabled={item.status === "Cancelado"} onChange={(event) => updateStatus(item.id, event.target.value)}>{["Pendente", "Confirmado", "Em Separação", "Entregue", ...(item.status === "Pendente PIX" ? ["Pendente PIX"] : []), ...(item.status === "Cancelado" ? ["Cancelado"] : [])].map((status) => <option key={status}>{status}</option>)}</select></td><td><select className="status-select" aria-label={`Status do pagamento ${item.id}`} value={item.payment_status || "A receber"} disabled={item.status === "Cancelado"} onChange={(event) => updatePaymentStatus(item.id, event.target.value)}>{["A receber", "Pago na entrega"].map((status) => <option key={status}>{status}</option>)}</select></td><td className="table-actions"><a className="table-link" href={`${siteUrl("admin")}?print=${item.id}`} target="_blank" rel="noreferrer">Romaneio ↗</a>{item.status !== "Cancelado" && <><a className="table-link" href={orderWhatsAppUrl(item) || undefined} target="_blank" rel="noreferrer" aria-disabled={!settings.phone} onClick={(event) => { if (!settings.phone) { event.preventDefault(); setError("Configure o WhatsApp da empresa nas configurações."); } }}>WhatsApp ↗</a><button disabled={item.payment_status === "Pago na entrega"} title={item.payment_status === "Pago na entrega" ? "Regularize o pagamento antes de cancelar." : undefined} onClick={() => cancelOrder(item)}>Cancelar</button></>}</td></tr>)}
+            {!orders.length && <tr><td colSpan="7" className="table-empty">Nenhum pedido recebido.</td></tr>}
           </tbody></table></div>
         </>}
         {tab === "users" && user.role === "admin" && <>
@@ -524,8 +518,7 @@ function Admin() {
           <form className="admin-form settings-form" onSubmit={saveSettings}><div className="form-grid">
             <label className="span-2">Nome da loja<input name="store_name" required defaultValue={settings.store_name} /></label>
             <label>Razão social / titular<input name="legal_name" defaultValue={settings.legal_name} /></label><label>CPF / CNPJ<input name="document" defaultValue={settings.document} /></label>
-            <label>WhatsApp da empresa<input name="phone" defaultValue={settings.phone} /></label><label>Chave PIX<input name="pix_key" defaultValue={settings.pix_key} /></label>
-            <label>Nome do recebedor PIX<input name="pix_merchant_name" maxLength="25" defaultValue={settings.pix_merchant_name} /></label><label>Cidade do recebedor<input name="pix_merchant_city" maxLength="15" defaultValue={settings.pix_merchant_city} /></label>
+            <label className="span-2">WhatsApp da empresa<input name="phone" defaultValue={settings.phone} /></label>
             <label className="span-2">URL da logomarca<input name="logo_url" type="url" value={settings.logo_url || ""} onChange={(event) => setSettings((current) => ({ ...current, logo_url: event.target.value }))} /></label>
             <label className="span-2">Enviar logomarca para o MongoDB<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={handleImageUpload} disabled={uploadingImage} />{uploadingImage && <small>Enviando imagem...</small>}{settings.logo_url && <img className="admin-image-preview logo-preview" src={mediaUrl(settings.logo_url)} alt="Prévia da logomarca" />}</label>
             <label className="span-2">Endereço comercial<input name="business_address" defaultValue={settings.business_address} /></label>

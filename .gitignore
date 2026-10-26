@@ -7,5 +7,6 @@ frontend/build/
 __pycache__/
 *.py[cod]
 .venv/
+**/.venv-validation/
 venv/
 .DS_Store

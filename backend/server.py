@@ -77,38 +77,6 @@ def public_product(product: dict[str, Any]) -> dict[str, Any]:
     return product
 
 
-def encode_pix(settings: dict[str, Any], amount: float, order_id: str) -> str:
-    key = str(settings.get("pix_key", "")).strip()
-    if not key:
-        return ""
-
-    def field(tag: str, value: str) -> str:
-        return f"{tag}{len(value):02d}{value}"
-
-    merchant = str(settings.get("pix_merchant_name", settings.get("store_name", "LOJA")))[:25]
-    city = str(settings.get("pix_merchant_city", "SAO PAULO"))[:15]
-    account = field("00", "br.gov.bcb.pix") + field("01", key)
-    additional = field("05", order_id[:25])
-    payload = (
-        field("00", "01")
-        + field("26", account)
-        + field("52", "0000")
-        + field("53", "986")
-        + field("54", f"{amount:.2f}")
-        + field("58", "BR")
-        + field("59", merchant)
-        + field("60", city)
-        + field("62", additional)
-        + "6304"
-    )
-    crc = 0xFFFF
-    for byte in payload.encode("utf-8"):
-        crc ^= byte << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
-    return f"{payload}{crc:04X}"
-
-
 class ProductInput(BaseModel):
     code: str = ""
     name: str = Field(min_length=1, max_length=160)
@@ -163,7 +131,6 @@ class CompanyRegistrationInput(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     phone: str = Field(default="", max_length=30)
-    pix_key: str = Field(default="", max_length=120)
     business_address: str = Field(default="", max_length=300)
 
     @field_validator("password")
@@ -192,9 +159,6 @@ class SettingsInput(BaseModel):
     legal_name: str = ""
     document: str = ""
     phone: str = ""
-    pix_key: str = ""
-    pix_merchant_name: str = "VITRINE VIRTUAL"
-    pix_merchant_city: str = "SAO PAULO"
     logo_url: str = ""
     business_address: str = ""
     whatsapp_message: str = "Olá! Segue o resumo do seu pedido:"
@@ -255,7 +219,7 @@ async def health_check() -> dict[str, str]:
 
 @app.middleware("http")
 async def select_tenant(request: Request, call_next):
-    public_paths = {"/health", "/api/platform/companies"}
+    public_paths = {"/health", "/docs", "/openapi.json", "/redoc", "/api/platform/companies"}
     if request.method == "OPTIONS" or request.url.path in public_paths:
         return await call_next(request)
 
@@ -350,7 +314,6 @@ async def register_company(data: CompanyRegistrationInput, request: Request):
                     legal_name=data.legal_name.strip(),
                     document=cnpj,
                     phone=data.phone.strip(),
-                    pix_key=data.pix_key.strip(),
                     business_address=data.business_address.strip(),
                 ).model_dump()
             },
@@ -460,9 +423,6 @@ async def get_public_settings():
     return {
         "store_name": settings.get("store_name", "Vitrine Virtual"),
         "phone": settings.get("phone", ""),
-        "pix_key": settings.get("pix_key", ""),
-        "pix_merchant_name": settings.get("pix_merchant_name", "VITRINE VIRTUAL"),
-        "pix_merchant_city": settings.get("pix_merchant_city", "SAO PAULO"),
         "logo_url": settings.get("logo_url", ""),
         "business_address": settings.get("business_address", ""),
         "document": settings.get("document", ""),
@@ -485,7 +445,6 @@ async def save_settings(data: SettingsInput, _: dict[str, Any] = Depends(current
 
 @api_router.post("/orders")
 async def create_order(data: OrderInput):
-    settings = await db.settings.find_one({"_id": "company"}) or {}
     lines: list[dict[str, Any]] = []
     for line in data.items:
         product = await db.products.find_one(
@@ -529,9 +488,10 @@ async def create_order(data: OrderInput):
             "customer": customer,
             "items": lines,
             "total": total,
-            "status": "Pendente PIX",
+            "status": "Pendente",
+            "payment_method": "Na entrega",
+            "payment_status": "A receber",
             "created_at": now_utc().isoformat(),
-            "pix_payload": encode_pix(settings, total, order_id),
         }
         await db.orders.insert_one(order)
     except Exception:
@@ -550,14 +510,24 @@ async def admin_orders(_: dict[str, Any] = Depends(current_user)):
 
 @api_router.patch("/admin/orders/{order_id}")
 async def update_order(order_id: str, body: dict[str, str], _: dict[str, Any] = Depends(current_user)):
-    allowed = {"Pendente PIX", "Confirmado", "Em Separação", "Entregue"}
-    status = body.get("status")
-    if status not in allowed:
-        raise HTTPException(status_code=422, detail="Status inválido")
-    result = await db.orders.update_one({"_id": order_id}, {"$set": {"status": status}})
+    allowed_statuses = {"Pendente", "Pendente PIX", "Confirmado", "Em Separação", "Entregue"}
+    updates: dict[str, str] = {}
+    if "status" in body:
+        status = body["status"]
+        if status not in allowed_statuses:
+            raise HTTPException(status_code=422, detail="Status inválido")
+        updates["status"] = status
+    if "payment_status" in body:
+        payment_status = body["payment_status"]
+        if payment_status not in {"A receber", "Pago na entrega"}:
+            raise HTTPException(status_code=422, detail="Status de pagamento inválido")
+        updates["payment_status"] = payment_status
+    if not updates:
+        raise HTTPException(status_code=422, detail="Informe o status do pedido ou do pagamento")
+    result = await db.orders.update_one({"_id": order_id}, {"$set": updates})
     if not result.matched_count:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
-    return {"id": order_id, "status": status}
+    return {"id": order_id, **updates}
 
 
 @api_router.get("/admin/customers")
@@ -600,6 +570,11 @@ async def cancel_order(order_id: str, _: dict[str, Any] = Depends(current_user))
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
     if order.get("status") == "Cancelado":
         raise HTTPException(status_code=409, detail="Este pedido já foi cancelado")
+    if order.get("payment_status") == "Pago na entrega":
+        raise HTTPException(
+            status_code=409,
+            detail="Regularize o pagamento antes de cancelar este pedido",
+        )
     result = await db.orders.update_one(
         {"_id": order_id, "status": {"$ne": "Cancelado"}},
         {"$set": {"status": "Cancelado", "cancelled_at": now_utc().isoformat()}},

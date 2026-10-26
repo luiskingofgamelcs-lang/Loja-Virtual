@@ -34,13 +34,13 @@ Aplicação de loja virtual e painel administrativo em português (Brasil).
 ## Funcionalidades
 
 - Vitrine pública com busca, categorias e filtro automático de produtos sem estoque.
-- Carrinho persistido no navegador, checkout de cliente, baixa de estoque, código PIX copia e cola e QR Code.
+- Carrinho persistido no navegador, checkout de cliente, baixa de estoque e pagamento na entrega.
 - Área administrativa para produtos, clientes, pedidos, configurações, usuários operadores e romaneio imprimível.
 - Upload de imagens de até 5 MB (JPEG, PNG, WebP ou GIF), armazenado no MongoDB GridFS.
 - Cadastro de empresas protegido pelo código mestre no backend; cada empresa recebe um banco MongoDB próprio, identificado pelo CNPJ.
 - Usuários operadores são criados somente pelo administrador da empresa; não há cadastro público de administradores.
 - Cancelamento de pedidos mantém o registro no histórico e repõe o estoque reservado.
-- PIX é gerado com a chave configurada pela loja. A confirmação do pagamento e a comunicação de pedidos são manuais; não há integração com um provedor de pagamentos.
+- Não há integração com provedor de pagamentos: o cliente paga ao receber o pedido, e o administrador pode registrar no painel quando o pagamento for recebido.
 
 Em produção, use HTTPS, configure `COOKIE_SECURE=true`, defina `CORS_ORIGINS` com a origem exata do frontend e não reutilize credenciais de desenvolvimento.
 
