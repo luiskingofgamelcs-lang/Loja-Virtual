@@ -16,6 +16,10 @@ services:
         generateValue: true
       - key: PLATFORM_SETUP_SECRET
         generateValue: true
+      - key: PLATFORM_ADMIN_EMAIL
+        sync: false
+      - key: PLATFORM_ADMIN_PASSWORD
+        sync: false
       - key: CORS_ORIGINS
         value: https://luiskingofgamelcs-lang.github.io
       - key: COOKIE_SECURE

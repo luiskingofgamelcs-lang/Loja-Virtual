@@ -18,6 +18,285 @@ const formatBRL = (value) =>
 const errorText = (error) =>
   error.response?.data?.detail || "Não foi possível concluir a operação. Tente novamente.";
 
+function PlatformAdmin() {
+  const [loggedIn, setLoggedIn] = useState(false);
+  const [companies, setCompanies] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadCompanies = async () => {
+    const { data } = await api.get("/platform/companies");
+    setCompanies(data);
+    setLoggedIn(true);
+  };
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        await loadCompanies();
+      } catch {
+        setLoggedIn(false);
+      }
+    })();
+  }, []);
+
+  const handleLogin = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setError("");
+    setLoading(true);
+    try {
+      await api.post("/platform/auth", {
+        email: form.get("email"),
+        password: form.get("password"),
+      });
+      await loadCompanies();
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStatusChange = async (company) => {
+    const status = company.status === "suspended" ? "active" : "suspended";
+    if (!window.confirm(status === "suspended" ? "Suspender o acesso desta empresa, preservando os dados?" : "Reativar o acesso desta empresa?")) return;
+    try {
+      await api.patch(`/platform/companies/${encodeURIComponent(company.cnpj)}/status`, { status });
+      setCompanies((current) => current.map((item) => item.cnpj === company.cnpj ? { ...item, status } : item));
+    } catch (failure) {
+      setError(errorText(failure));
+    }
+  };
+
+  if (!loggedIn) {
+    return (
+      <main className="login-page">
+        <form className="login-card" onSubmit={handleLogin}>
+          <p className="eyebrow">PLATAFORMA</p>
+          <h1>Gerenciamento da plataforma</h1>
+          <p>Controle as empresas e os tenants conectados ao sistema.</p>
+          <label>E-mail do administrador<input name="email" type="email" required autoComplete="username" /></label>
+          <label>Senha<input name="password" type="password" required autoComplete="current-password" /></label>
+          {error && <p className="form-error">{error}</p>}
+          <button className="button primary full" disabled={loading}>{loading ? "Entrando..." : "Entrar no painel"}</button>
+          <a href={siteUrl()} className="back-link">← Voltar para a vitrine</a>
+        </form>
+      </main>
+    );
+  }
+
+  return (
+    <main className="admin-shell">
+      <aside className="admin-sidebar">
+        <a className="brand" href={siteUrl()}><span className="brand-mark">V</span><span>Vitrine Virtual<small>GESTÃO DA PLATAFORMA</small></span></a>
+        <button className="logout" onClick={async () => {
+          try {
+            await api.post("/platform/logout");
+            setLoggedIn(false);
+            setCompanies([]);
+          } catch (failure) {
+            setError(errorText(failure));
+          }
+        }}>Sair</button>
+      </aside>
+      <main className="admin-main">
+        <header className="admin-topbar"><span>Empresas cadastradas</span></header>
+        <section className="admin-content">
+          {error && <div className="notice error-notice">{error}</div>}
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>CNPJ</th><th>Loja</th><th>E-mail</th><th>Banco</th><th>Status</th><th></th></tr></thead>
+              <tbody>
+                {companies.map((company) => (
+                  <tr key={company.cnpj}>
+                    <td>{company.cnpj}</td>
+                    <td>{company.store_name}</td>
+                    <td>{company.email}</td>
+                    <td>{company.database}</td>
+                    <td>{company.status === "suspended" ? "Suspensa" : "Ativa"}</td>
+                    <td className="table-actions"><button onClick={() => handleStatusChange(company)}>{company.status === "suspended" ? "Reativar" : "Suspender"}</button></td>
+                  </tr>
+                ))}
+                {!companies.length && <tr><td colSpan="6" className="table-empty">Nenhuma empresa cadastrada.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </main>
+  );
+}
+
+function CustomerPortal({ initialMode = "login" }) {
+  const [mode, setMode] = useState(initialMode);
+  const [customer, setCustomer] = useState(null);
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadCustomer = async () => {
+    if (!getTenantCnpj()) {
+      setLoading(false);
+      return false;
+    }
+    try {
+      const { data } = await api.get("/customer/me");
+      setCustomer(data);
+      const ordersResponse = await api.get("/customer/orders");
+      setOrders(ordersResponse.data);
+      setError("");
+      return true;
+    } catch (failure) {
+      setCustomer(null);
+      setOrders([]);
+      if (failure.response?.status !== 401) setError(errorText(failure));
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadCustomer();
+  }, []);
+
+  const handleRegister = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setError("");
+    try {
+      await api.post("/customer/register", {
+        name: form.get("name"),
+        person_type: form.get("person_type") || "fisica",
+        document: form.get("document"),
+        email: form.get("email"),
+        phone: form.get("phone"),
+        password: form.get("password"),
+        address: form.get("address") || "",
+        neighborhood: form.get("neighborhood") || "",
+        city: form.get("city") || "",
+        postal_code: form.get("postal_code") || "",
+      });
+      setMode("login");
+    } catch (failure) {
+      setError(errorText(failure));
+    }
+  };
+
+  const handleLogin = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setError("");
+    try {
+      await api.post("/customer/login", {
+        cnpj: getTenantCnpj(),
+        email: form.get("email"),
+        password: form.get("password"),
+      });
+      await loadCustomer();
+    } catch (failure) {
+      setError(errorText(failure));
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await api.post("/customer/logout");
+      setCustomer(null);
+      setOrders([]);
+    } catch (failure) {
+      setError(errorText(failure));
+    }
+  };
+
+  if (!getTenantCnpj()) {
+    return (
+      <main className="login-page">
+        <div className="login-card">
+          <p className="eyebrow">CLIENTE</p>
+          <h1>Selecione a empresa</h1>
+          <p>Use o CNPJ da loja na URL, por exemplo: ?cnpj=12345678000199</p>
+          <a href={siteUrl()} className="button primary full">Voltar para a loja</a>
+        </div>
+      </main>
+    );
+  }
+
+  if (loading) return <div className="admin-loading">Carregando área do cliente...</div>;
+
+  if (customer) {
+    return (
+      <main className="admin-shell">
+        <aside className="admin-sidebar">
+          <a className="brand" href={siteUrl()}><span className="brand-mark">V</span><span>Vitrine Virtual<small>ÁREA DO CLIENTE</small></span></a>
+          <button className="logout" onClick={handleLogout}>Sair</button>
+        </aside>
+        <main className="admin-main">
+          <header className="admin-topbar"><span>Meu cadastro</span></header>
+          <section className="admin-content">
+            <div className="admin-heading">
+              <div>
+                <p className="eyebrow">CLIENTE</p>
+                <h1>{customer.name}</h1>
+                <p>{customer.email} · {customer.phone || "Sem telefone cadastrado"}</p>
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Pedido</th><th>Status</th><th>Pagamento</th><th>Total</th></tr></thead>
+                <tbody>
+                  {orders.map((order) => (
+                    <tr key={order.id}><td>{order.id.slice(0, 8)}</td><td>{order.status}</td><td>{order.payment_status}</td><td>{formatBRL(order.total)}</td></tr>
+                  ))}
+                  {!orders.length && <tr><td colSpan="4" className="table-empty">Nenhum pedido encontrado.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </main>
+      </main>
+    );
+  }
+
+  return (
+    <main className="login-page">
+      {mode === "register" ? (
+        <form className="login-card" onSubmit={handleRegister}>
+          <p className="eyebrow">CLIENTE</p>
+          <h1>Cadastre-se</h1>
+          <div className="form-grid">
+            <label className="span-2">Nome completo<input name="name" required /></label>
+            <label>Tipo<select name="person_type" defaultValue="fisica"><option value="fisica">Pessoa física</option><option value="juridica">Pessoa jurídica</option></select></label>
+            <label>CPF / CNPJ<input name="document" required /></label>
+            <label className="span-2">E-mail<input name="email" type="email" required /></label>
+            <label className="span-2">Telefone<input name="phone" /></label>
+            <label className="span-2">Senha<input name="password" type="password" required /></label>
+            <label className="span-2">Endereço<input name="address" /></label>
+            <label>Bairro<input name="neighborhood" /></label>
+            <label>Cidade<input name="city" /></label>
+            <label>CEP<input name="postal_code" /></label>
+          </div>
+          {error && <p className="form-error">{error}</p>}
+          <button className="button primary full">Cadastrar cliente</button>
+          <button type="button" className="button secondary full" onClick={() => setMode("login")}>Já tenho conta</button>
+        </form>
+      ) : (
+        <form className="login-card" onSubmit={handleLogin}>
+          <p className="eyebrow">CLIENTE</p>
+          <h1>Entrar na conta</h1>
+          <label>E-mail<input name="email" type="email" required autoComplete="username" /></label>
+          <label>Senha<input name="password" type="password" required autoComplete="current-password" /></label>
+          {error && <p className="form-error">{error}</p>}
+          <button className="button primary full">Acessar área do cliente</button>
+          <button type="button" className="button secondary full" onClick={() => setMode("register")}>Quero me cadastrar</button>
+          <a href={siteUrl()} className="back-link">← Voltar para a vitrine</a>
+        </form>
+      )}
+    </main>
+  );
+}
+
 function Storefront() {
   const { items: cart, add, setQty, remove, clear, count: cartCount, total } = useCart();
   const [products, setProducts] = useState([]);
@@ -31,6 +310,7 @@ function Storefront() {
   const [order, setOrder] = useState(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [needsCustomerLogin, setNeedsCustomerLogin] = useState(false);
 
   const refreshProducts = async () => {
     const { data } = await api.get("/products");
@@ -68,6 +348,7 @@ function Storefront() {
     const customer = Object.fromEntries(form.entries());
     setBusy(true);
     setMessage("");
+    setNeedsCustomerLogin(false);
     try {
       const { data } = await api.post("/orders", {
         customer,
@@ -79,6 +360,7 @@ function Storefront() {
       await refreshProducts();
     } catch (error) {
       setMessage(errorText(error));
+      setNeedsCustomerLogin(error.response?.status === 401);
     } finally {
       setBusy(false);
     }
@@ -113,6 +395,7 @@ function Storefront() {
           <input data-testid="storefront-search-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar produtos..." />
         </label>
         <div className="header-actions">
+          <a className="admin-link" href={siteUrl("cliente")}>Minha conta</a>
           <a className="admin-link" href={siteUrl("admin")}>Acesso admin</a>
           <button className="cart-trigger" data-testid="storefront-cart-button" onClick={() => setCartOpen(true)}>
             Sacola <span className="cart-badge" data-testid="storefront-cart-count-badge">{cartCount}</span>
@@ -213,7 +496,7 @@ function Storefront() {
             <label className="span-2">Observações<textarea name="notes" rows="2" /></label>
             <div className="notice span-2">O pagamento será feito na entrega.</div>
             <div className="span-2 checkout-total"><span>Total do pedido</span><strong>{formatBRL(total)}</strong></div>
-            {message && <p className="form-error span-2">{message}</p>}
+            {message && <p className="form-error span-2">{message}{needsCustomerLogin && <> <a href={siteUrl("cliente")}>Entre na sua conta para continuar.</a></>}</p>}
             <button className="button primary full span-2" data-testid="checkout-submit-button" disabled={busy}>{busy ? "Registrando pedido..." : "Confirmar pedido"}</button>
           </form>
         </section>
@@ -533,6 +816,10 @@ function Admin() {
 
 export default function App() {
   if (appPath === "/cadastro") return <CompanyRegistration />;
+  if (appPath === "/superadmin") return <PlatformAdmin />;
+  if (appPath === "/cliente" || appPath.startsWith("/cliente/")) {
+    return <CustomerPortal initialMode={appPath === "/cliente/cadastro" ? "register" : "login"} />;
+  }
   if (appPath.startsWith("/admin")) return <Admin />;
   return <Storefront />;
 }

@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.getenv("DB_NAME", "test_database")
 PLATFORM_SETUP_SECRET = os.getenv("PLATFORM_SETUP_SECRET", "")
+PLATFORM_ADMIN_EMAIL = os.getenv("PLATFORM_ADMIN_EMAIL", "").strip().lower()
+PLATFORM_ADMIN_PASSWORD = os.getenv("PLATFORM_ADMIN_PASSWORD", "")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
 JWT_SECRET = os.getenv("JWT_SECRET") or secrets.token_urlsafe(32)
 MAX_IMAGE_SIZE = 5 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -60,6 +67,13 @@ def normalize_cnpj(value: str) -> str:
     return digits
 
 
+def normalize_customer_document(value: str) -> str:
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) not in {11, 14} or len(set(digits)) == 1:
+        raise HTTPException(status_code=422, detail="Informe um CPF ou CNPJ válido")
+    return digits
+
+
 def tenant_database_name(cnpj: str) -> str:
     return f"store_{cnpj}"
 
@@ -72,9 +86,16 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def public_product(product: dict[str, Any]) -> dict[str, Any]:
-    product["id"] = str(product.pop("_id", product.get("id", "")))
-    return product
+def public_product(product: dict[str, Any], *, include_internal: bool = False) -> dict[str, Any]:
+    result = dict(product)
+    result["id"] = str(result.pop("_id", result.get("id", "")))
+    if not include_internal:
+        public_fields = {
+            "id", "code", "name", "description", "category", "price",
+            "stock", "unit", "variation", "image_url", "active",
+        }
+        result = {key: value for key, value in result.items() if key in public_fields}
+    return result
 
 
 class ProductInput(BaseModel):
@@ -121,7 +142,14 @@ class OrderInput(BaseModel):
 class LoginInput(BaseModel):
     cnpj: str
     email: str
-    password: str
+    password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def password_fits_bcrypt(cls, password: str) -> str:
+        if len(password.encode()) > 72:
+            raise ValueError("A senha deve ter no máximo 72 bytes")
+        return password
 
 
 class CompanyRegistrationInput(BaseModel):
@@ -139,6 +167,39 @@ class CompanyRegistrationInput(BaseModel):
         if len(password.encode()) > 72:
             raise ValueError("A senha deve ter no máximo 72 bytes")
         return password
+
+
+class PlatformLoginInput(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=12, max_length=128)
+
+
+class CustomerAccountInput(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    person_type: str = Field(default="fisica")
+    document: str = Field(default="", max_length=30)
+    email: EmailStr
+    phone: str = Field(default="", max_length=30)
+    password: str = Field(min_length=8, max_length=128)
+    address: str = Field(default="", max_length=240)
+    neighborhood: str = Field(default="", max_length=120)
+    city: str = Field(default="", max_length=120)
+    postal_code: str = Field(default="", max_length=30)
+
+    @field_validator("password")
+    @classmethod
+    def password_fits_bcrypt(cls, password: str) -> str:
+        if len(password.encode()) > 72:
+            raise ValueError("A senha deve ter no máximo 72 bytes")
+        return password
+
+    @field_validator("person_type")
+    @classmethod
+    def valid_person_type(cls, person_type: str) -> str:
+        normalized = person_type.strip().lower()
+        if normalized not in {"fisica", "juridica"}:
+            raise ValueError("Tipo de pessoa inválido")
+        return normalized
 
 
 class UserInput(BaseModel):
@@ -165,17 +226,16 @@ class SettingsInput(BaseModel):
     free_delivery_minimum: float = Field(default=0, ge=0)
 
 
-def token_for(user_id: str, email: str) -> str:
-    return jwt.encode(
-        {
-            "sub": user_id,
-            "email": email,
-            "cnpj": tenant_cnpj.get(),
-            "exp": now_utc() + timedelta(days=7),
-        },
-        JWT_SECRET,
-        algorithm="HS256",
-    )
+def token_for(user_id: str, email: str, *, cnpj: str | None = None, scope: str = "tenant") -> str:
+    payload: dict[str, Any] = {
+        "sub": user_id,
+        "email": email,
+        "scope": scope,
+        "exp": now_utc() + timedelta(hours=12),
+    }
+    if cnpj is not None:
+        payload["cnpj"] = cnpj
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
 async def current_user(request: Request) -> dict[str, Any]:
@@ -185,6 +245,8 @@ async def current_user(request: Request) -> dict[str, Any]:
         token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        if payload.get("scope") != "tenant":
+            raise jwt.InvalidTokenError("Invalid scope")
         if payload.get("cnpj") != tenant_cnpj.get():
             raise jwt.InvalidTokenError("Token tenant mismatch")
         user = await db.users.find_one({"_id": payload["sub"], "role": {"$in": ["admin", "staff"]}})
@@ -201,10 +263,70 @@ async def current_admin(user: dict[str, Any] = Depends(current_user)) -> dict[st
     return user
 
 
+async def current_platform_admin(request: Request) -> dict[str, Any]:
+    token = request.cookies.get("platform_access_token")
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except (jwt.PyJWTError, TypeError, KeyError):
+        raise HTTPException(status_code=401, detail="Autenticação de plataforma necessária")
+    if payload.get("scope") != "platform":
+        raise HTTPException(status_code=401, detail="Sessão de plataforma inválida")
+    admin = await registry_db.platform_admins.find_one({"_id": payload["sub"]})
+    if not admin:
+        raise HTTPException(status_code=401, detail="Sessão de plataforma inválida")
+    return admin
+
+
+async def current_customer(request: Request) -> dict[str, Any]:
+    customer = await optional_customer(request)
+    if not customer:
+        raise HTTPException(status_code=401, detail="Autenticação do cliente necessária")
+    return customer
+
+
+async def optional_customer(request: Request) -> dict[str, Any] | None:
+    token = request.cookies.get("customer_access_token")
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except (jwt.PyJWTError, TypeError, KeyError):
+        raise HTTPException(status_code=401, detail="Sessão de cliente inválida")
+    if payload.get("scope") != "customer" or payload.get("cnpj") != tenant_cnpj.get():
+        raise HTTPException(status_code=401, detail="Sessão de cliente inválida")
+    customer = await db.customer_accounts.find_one({"_id": payload["sub"]})
+    if not customer:
+        raise HTTPException(status_code=401, detail="Sessão de cliente inválida")
+    return customer
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await registry_db.companies.create_index("cnpj", unique=True)
     await registry_db.companies.create_index("email", unique=True)
+    await registry_db.platform_admins.create_index("email", unique=True)
+    if PLATFORM_ADMIN_EMAIL and PLATFORM_ADMIN_PASSWORD:
+        if len(PLATFORM_ADMIN_PASSWORD) < 12 or len(PLATFORM_ADMIN_PASSWORD.encode()) > 72:
+            raise RuntimeError("PLATFORM_ADMIN_PASSWORD deve ter pelo menos 12 caracteres e no máximo 72 bytes")
+        await registry_db.platform_admins.update_one(
+            {"_id": "platform-admin"},
+            {
+                "$set": {
+                    "email": PLATFORM_ADMIN_EMAIL,
+                    "password_hash": bcrypt.hashpw(PLATFORM_ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode(),
+                    "name": "Administrador da plataforma",
+                    "role": "platform",
+                    "created_at": now_utc().isoformat(),
+                }
+            },
+            upsert=True,
+        )
     yield
     client.close()
 
@@ -219,15 +341,25 @@ async def health_check() -> dict[str, str]:
 
 @app.middleware("http")
 async def select_tenant(request: Request, call_next):
-    public_paths = {"/health", "/docs", "/openapi.json", "/redoc", "/api/platform/companies"}
-    if request.method == "OPTIONS" or request.url.path in public_paths:
+    public_paths = {
+        "/health",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+        "/api/platform/auth",
+        "/api/platform/companies",
+        "/api/platform/logout",
+    }
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if request.url.path in public_paths or request.url.path.startswith("/api/platform/"):
         return await call_next(request)
 
     requested_cnpj = (
         request.headers.get("X-Store-CNPJ", "")
         or request.query_params.get("cnpj", "")
     ).strip()
-    token = request.cookies.get("access_token", "")
+    token = request.cookies.get("access_token") or request.cookies.get("customer_access_token", "")
     if token and not requested_cnpj:
         try:
             requested_cnpj = jwt.decode(token, JWT_SECRET, algorithms=["HS256"]).get("cnpj", "")
@@ -243,7 +375,10 @@ async def select_tenant(request: Request, call_next):
     except HTTPException as error:
         return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
 
-    company = await registry_db.companies.find_one({"cnpj": cnpj}, {"_id": 0, "database": 1})
+    company = await registry_db.companies.find_one(
+        {"cnpj": cnpj, "status": {"$ne": "suspended"}},
+        {"_id": 0, "database": 1},
+    )
     if not company:
         return JSONResponse(status_code=404, content={"detail": "Empresa não cadastrada"})
 
@@ -285,6 +420,7 @@ async def register_company(data: CompanyRegistrationInput, request: Request):
                 "email": email,
                 "store_name": data.store_name.strip(),
                 "database": tenant_database_name(cnpj),
+                "status": "active",
                 "created_at": now_utc().isoformat(),
             }
         )
@@ -330,6 +466,186 @@ async def register_company(data: CompanyRegistrationInput, request: Request):
         "store_name": data.store_name.strip(),
         "email": email,
     }
+
+
+@api_router.post("/platform/auth")
+async def platform_login(data: PlatformLoginInput, response: Response):
+    if not PLATFORM_ADMIN_EMAIL or not PLATFORM_ADMIN_PASSWORD:
+        raise HTTPException(status_code=503, detail="Painel de plataforma não está configurado")
+    email = data.email.strip().lower()
+    admin = await registry_db.platform_admins.find_one({"email": email})
+    if not admin:
+        raise HTTPException(status_code=401, detail="Credenciais de plataforma inválidas")
+    try:
+        valid = (
+            bcrypt.checkpw(data.password.encode(), admin["password_hash"].encode())
+            if isinstance(admin.get("password_hash"), str)
+            else False
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise HTTPException(status_code=401, detail="Credenciais de plataforma inválidas")
+    response.set_cookie(
+        "platform_access_token",
+        token_for(str(admin["_id"]), admin["email"], scope="platform"),
+        httponly=True,
+        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        samesite="none" if os.getenv("COOKIE_SECURE", "false").lower() == "true" else "lax",
+        max_age=43200,
+        path="/",
+    )
+    return {"id": str(admin["_id"]), "email": admin["email"], "name": admin.get("name", "Plataforma")}
+
+
+@api_router.post("/platform/logout")
+async def platform_logout(response: Response):
+    response.delete_cookie("platform_access_token", path="/")
+    return {"ok": True}
+
+
+@api_router.get("/platform/companies")
+async def list_companies(_: dict[str, Any] = Depends(current_platform_admin)):
+    companies = await registry_db.companies.find({}).sort("created_at", 1).to_list(1000)
+    return [
+        {
+            "cnpj": company.get("cnpj", ""),
+            "store_name": company.get("store_name", ""),
+            "email": company.get("email", ""),
+            "database": company.get("database", ""),
+            "status": company.get("status", "active"),
+            "created_at": company.get("created_at", ""),
+        }
+        for company in companies
+    ]
+
+
+@api_router.patch("/platform/companies/{cnpj}/status")
+async def set_company_status(
+    cnpj: str,
+    body: dict[str, str],
+    _: dict[str, Any] = Depends(current_platform_admin),
+):
+    normalized = normalize_cnpj(cnpj)
+    status = body.get("status")
+    if status not in {"active", "suspended"}:
+        raise HTTPException(status_code=422, detail="Status de empresa inválido")
+    result = await registry_db.companies.update_one(
+        {"cnpj": normalized},
+        {"$set": {"status": status}},
+    )
+    if not result.matched_count:
+        raise HTTPException(status_code=404, detail="Empresa não encontrada")
+    return {"cnpj": normalized, "status": status}
+
+
+@api_router.post("/customer/register")
+async def register_customer(data: CustomerAccountInput):
+    document = normalize_customer_document(data.document)
+    email = data.email.strip().lower()
+    accounts = db.customer_accounts
+    await accounts.create_index("email", unique=True)
+    await accounts.create_index("document", unique=True)
+    await db.orders.create_index("customer_account_id")
+    customer = {
+        "_id": str(uuid.uuid4()),
+        "name": data.name.strip(),
+        "person_type": (data.person_type or "fisica").strip().lower(),
+        "document": document,
+        "email": email,
+        "phone": data.phone.strip(),
+        "password_hash": bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode(),
+        "address": data.address.strip(),
+        "neighborhood": data.neighborhood.strip(),
+        "city": data.city.strip(),
+        "postal_code": data.postal_code.strip(),
+        "created_at": now_utc().isoformat(),
+        "updated_at": now_utc().isoformat(),
+        "role": "customer",
+    }
+    try:
+        await accounts.insert_one(customer)
+    except DuplicateKeyError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Já existe um cliente cadastrado com este e-mail ou documento",
+        ) from error
+    return {"id": customer["_id"], "name": customer["name"], "email": customer["email"], "person_type": customer["person_type"]}
+
+
+@api_router.post("/customer/login")
+async def customer_login(body: LoginInput, response: Response):
+    if normalize_cnpj(body.cnpj) != tenant_cnpj.get():
+        raise HTTPException(status_code=400, detail="O CNPJ informado não corresponde à empresa selecionada")
+    email = body.email.strip().lower()
+    customer = await db.customer_accounts.find_one({"email": email})
+    if not customer:
+        raise HTTPException(status_code=401, detail="Cliente ou senha inválidos")
+    try:
+        valid = (
+            bcrypt.checkpw(body.password.encode(), customer["password_hash"].encode())
+            if isinstance(customer.get("password_hash"), str)
+            else False
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise HTTPException(status_code=401, detail="Cliente ou senha inválidos")
+    response.set_cookie(
+        "customer_access_token",
+        token_for(str(customer["_id"]), customer["email"], cnpj=tenant_cnpj.get(), scope="customer"),
+        httponly=True,
+        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        samesite="none" if os.getenv("COOKIE_SECURE", "false").lower() == "true" else "lax",
+        max_age=43200,
+        path="/",
+    )
+    return {
+        "id": str(customer["_id"]),
+        "name": customer.get("name", "Cliente"),
+        "email": customer.get("email", email),
+        "phone": customer.get("phone", ""),
+        "person_type": customer.get("person_type", "fisica"),
+    }
+
+
+@api_router.post("/customer/logout")
+async def customer_logout(response: Response):
+    response.delete_cookie("customer_access_token", path="/")
+    return {"ok": True}
+
+
+@api_router.get("/customer/me")
+async def customer_me(current_customer_data: dict[str, Any] = Depends(current_customer)):
+    return {
+        "id": str(current_customer_data["_id"]),
+        "name": current_customer_data.get("name", "Cliente"),
+        "email": current_customer_data.get("email", ""),
+        "phone": current_customer_data.get("phone", ""),
+        "person_type": current_customer_data.get("person_type", "fisica"),
+        "address": current_customer_data.get("address", ""),
+        "neighborhood": current_customer_data.get("neighborhood", ""),
+        "city": current_customer_data.get("city", ""),
+        "postal_code": current_customer_data.get("postal_code", ""),
+    }
+
+
+@api_router.get("/customer/orders")
+async def customer_orders(current_customer_data: dict[str, Any] = Depends(current_customer)):
+    orders = await db.orders.find(
+        {"customer_account_id": str(current_customer_data["_id"])}
+    ).sort("created_at", -1).to_list(1000)
+    return [
+        {
+            "id": str(order["_id"]),
+            "status": order.get("status", "Pendente"),
+            "payment_status": order.get("payment_status", "A receber"),
+            "total": order.get("total", 0),
+            "created_at": order.get("created_at", ""),
+            "items": order.get("items", []),
+        }
+        for order in orders
+    ]
 
 
 @api_router.get("/products")
@@ -388,7 +704,7 @@ async def get_image(file_id: str):
 @api_router.get("/admin/products")
 async def admin_products(_: dict[str, Any] = Depends(current_user)):
     products = await db.products.find({}).sort("name", 1).to_list(1000)
-    return [public_product(item) for item in products]
+    return [public_product(item, include_internal=True) for item in products]
 
 
 @api_router.post("/admin/products")
@@ -398,7 +714,7 @@ async def create_product(data: ProductInput, _: dict[str, Any] = Depends(current
     product["created_at"] = now_utc().isoformat()
     result = await db.products.insert_one(product)
     product["_id"] = result.inserted_id
-    return public_product(product)
+    return public_product(product, include_internal=True)
 
 
 @api_router.put("/admin/products/{product_id}")
@@ -425,7 +741,6 @@ async def get_public_settings():
         "phone": settings.get("phone", ""),
         "logo_url": settings.get("logo_url", ""),
         "business_address": settings.get("business_address", ""),
-        "document": settings.get("document", ""),
         "whatsapp_message": settings.get("whatsapp_message", "Olá! Segue o resumo do seu pedido:"),
         "free_delivery_minimum": settings.get("free_delivery_minimum", 0),
     }
@@ -444,7 +759,10 @@ async def save_settings(data: SettingsInput, _: dict[str, Any] = Depends(current
 
 
 @api_router.post("/orders")
-async def create_order(data: OrderInput):
+async def create_order(
+    data: OrderInput,
+    customer_account: dict[str, Any] = Depends(current_customer),
+):
     lines: list[dict[str, Any]] = []
     for line in data.items:
         product = await db.products.find_one(
@@ -493,12 +811,14 @@ async def create_order(data: OrderInput):
             "payment_status": "A receber",
             "created_at": now_utc().isoformat(),
         }
+        order["customer_account_id"] = str(customer_account["_id"])
         await db.orders.insert_one(order)
     except Exception:
         for product_id, quantity in updated:
             await db.products.update_one({"_id": product_id}, {"$inc": {"stock": quantity}})
         raise
     order["id"] = order.pop("_id")
+    order.pop("customer_account_id", None)
     return order
 
 
@@ -532,7 +852,7 @@ async def update_order(order_id: str, body: dict[str, str], _: dict[str, Any] = 
 
 @api_router.get("/admin/customers")
 async def admin_customers(_: dict[str, Any] = Depends(current_user)):
-    customers = await db.customers.find({}).sort("name", 1).to_list(1000)
+    customers = await db.customers.find({}, {"password_hash": 0}).sort("name", 1).to_list(1000)
     for customer in customers:
         customer["id"] = str(customer.pop("_id", ""))
         customer["order_count"] = await db.orders.count_documents({"customer.phone": customer.get("phone")})
@@ -664,11 +984,11 @@ async def login(body: LoginInput, response: Response):
         raise HTTPException(status_code=401, detail="Usuário/e-mail ou senha inválidos")
     response.set_cookie(
         "access_token",
-        token_for(str(user["_id"]), user.get("email") or user.get("username", "")),
+        token_for(str(user["_id"]), user.get("email") or user.get("username", ""), cnpj=tenant_cnpj.get(), scope="tenant"),
         httponly=True,
         secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
         samesite="none" if os.getenv("COOKIE_SECURE", "false").lower() == "true" else "lax",
-        max_age=604800,
+        max_age=43200,
         path="/",
     )
     return {
@@ -698,11 +1018,35 @@ async def auth_me(user: dict[str, Any] = Depends(current_user)):
 
 
 app.include_router(api_router)
-origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if origin.strip()]
+
+
+@app.middleware("http")
+async def protect_api_responses(request: Request, call_next):
+    origin = request.headers.get("Origin")
+    if (
+        request.method not in {"GET", "HEAD", "OPTIONS"}
+        and origin
+        and origin not in ALLOWED_ORIGINS
+    ):
+        return JSONResponse(status_code=403, content={"detail": "Origem não autorizada"})
+
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/media/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Store-CNPJ", "X-Setup-Secret"],
 )

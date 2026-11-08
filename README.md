@@ -48,15 +48,18 @@ Em produção, use HTTPS, configure `COOKIE_SECURE=true`, defina `CORS_ORIGINS` 
 
 O arquivo `render.yaml` configura a API FastAPI no plano gratuito do Render. O banco MongoDB e as imagens do GridFS ficam no MongoDB Atlas.
 
-1. Crie uma conta no MongoDB Atlas, crie um cluster e um usuário de banco com senha forte. Em **Network Access**, permita conexões a partir de `0.0.0.0/0`, necessário porque os endereços de saída do Render podem variar. Proteja o acesso com uma senha exclusiva e não compartilhe a URL do banco.
+1. Crie uma conta no MongoDB Atlas, crie um cluster e um usuário de banco com senha forte. Em **Network Access**, permita somente os endereços de saída/IPs ou a rede privada configurada para o serviço no Render; não use `0.0.0.0/0`. Proteja o acesso com uma senha exclusiva e não compartilhe a URL do banco.
 2. No Atlas, copie a connection string `mongodb+srv://...` e substitua o marcador de senha pelo segredo do usuário criado.
 3. No Render, escolha **New → Blueprint**, conecte o repositório `luiskingofgamelcs-lang/Loja-Virtual` e selecione a branch `main`. O Render encontrará `render.yaml`; informe a connection string em `MONGO_URL` e crie o serviço. `JWT_SECRET` e `PLATFORM_SETUP_SECRET` serão gerados pelo Render e devem permanecer somente no ambiente do serviço.
 4. Após o deploy, teste `https://<nome-do-servico>.onrender.com/health`. A resposta esperada é `{"status":"ok"}`. A documentação da API fica em `/docs`.
 5. No repositório GitHub, abra **Settings → Secrets and variables → Actions → Variables → New repository variable**. Crie `VITE_BACKEND_URL` com a URL base terminada em `/api`, por exemplo `https://<nome-do-servico>.onrender.com/api`. Não acrescente `/` ao final.
 6. Em **Actions**, abra `Deploy frontend to GitHub Pages` e escolha **Run workflow** para reconstruir o frontend usando a variável nova. Depois teste o site publicado.
 7. Para cadastrar a primeira empresa, use a tela `/cadastro`. Obtenha o valor de `PLATFORM_SETUP_SECRET` no ambiente do serviço do Render e informe-o no campo de código mestre; não o publique nem o envie em mensagens.
+8. Configure `PLATFORM_ADMIN_EMAIL` e uma senha exclusiva de pelo menos 12 caracteres em `PLATFORM_ADMIN_PASSWORD` no ambiente do Render; acesse `/superadmin` para listar, suspender ou reativar empresas. A suspensão bloqueia o tenant sem apagar seu banco.
+9. Os clientes da loja se cadastram em `/cliente/cadastro?cnpj=<cnpj-da-empresa>` e acessam pedidos e perfil em `/cliente?cnpj=<cnpj-da-empresa>`. As contas ficam em uma coleção separada dentro do banco exclusivo de cada loja; pedidos só aparecem no histórico da conta que os criou autenticada.
+10. A vitrine expõe apenas dados de catálogo necessários à compra. Cadastro e login são públicos para permitir acesso, mas pedidos exigem sessão do cliente; rotas administrativas e de perfil também exigem sessão. Respostas da API não são armazenadas em cache, e origens de escrita fora de `CORS_ORIGINS` são recusadas.
 
-O plano gratuito do Render pode suspender o serviço após inatividade, causando demora na primeira chamada. O acesso de rede `0.0.0.0/0` do Atlas deve ser combinado com usuário/senha fortes e nunca com credenciais reutilizadas.
+O plano gratuito do Render pode suspender o serviço após inatividade, causando demora na primeira chamada. Mantenha as credenciais do MongoDB e os segredos somente nas variáveis privadas do Render.
 
 ## Publicação pelo GitHub Pages
 
