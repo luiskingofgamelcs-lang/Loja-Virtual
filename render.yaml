@@ -20,20 +20,6 @@ services:
         sync: false
       - key: PLATFORM_ADMIN_PASSWORD
         sync: false
-      - key: SMTP_HOST
-        sync: false
-      - key: SMTP_PORT
-        value: "587"
-      - key: SMTP_USERNAME
-        sync: false
-      - key: SMTP_PASSWORD
-        sync: false
-      - key: SMTP_FROM
-        sync: false
-      - key: SMTP_USE_SSL
-        value: "false"
-      - key: FRONTEND_URL
-        value: https://luiskingofgamelcs-lang.github.io/Loja-Virtual
       - key: CORS_ORIGINS
         value: https://luiskingofgamelcs-lang.github.io
       - key: COOKIE_SECURE

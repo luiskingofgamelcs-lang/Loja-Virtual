@@ -3,7 +3,6 @@ import { api, getTenantCnpj, mediaUrl, uploadImage } from "./lib/api.js";
 import { useAuth } from "./context/AuthContext.jsx";
 import { useCart } from "./context/CartContext.jsx";
 import CompanyRegistration from "./pages/CompanyRegistration.jsx";
-import SetCompanyPassword from "./pages/SetCompanyPassword.jsx";
 
 const basePath = import.meta.env.BASE_URL;
 const siteUrl = (path = "") => {
@@ -25,7 +24,6 @@ function PlatformAdmin() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [invitingCnpj, setInvitingCnpj] = useState("");
 
   const loadCompanies = async () => {
     const { data } = await api.get("/platform/companies");
@@ -69,20 +67,6 @@ function PlatformAdmin() {
       setCompanies((current) => current.map((item) => item.cnpj === company.cnpj ? { ...item, status } : item));
     } catch (failure) {
       setError(errorText(failure));
-    }
-  };
-
-  const resendSetupInvitation = async (company) => {
-    setError("");
-    setNotice("");
-    setInvitingCnpj(company.cnpj);
-    try {
-      await api.post(`/platform/companies/${encodeURIComponent(company.cnpj)}/setup-invitation`);
-      setNotice(`Convite reenviado para ${company.email}.`);
-    } catch (failure) {
-      setError(errorText(failure));
-    } finally {
-      setInvitingCnpj("");
     }
   };
 
@@ -133,9 +117,8 @@ function PlatformAdmin() {
                     <td>{company.email}</td>
                     <td>{company.database}</td>
                     <td>{company.status === "suspended" ? "Suspensa" : "Ativa"}</td>
-                    <td>{company.owner_setup_pending ? "Aguardando definição de senha" : "Ativado"}</td>
+                    <td>{company.owner_password_change_pending ? "Troca de senha pendente" : "Ativado"}</td>
                     <td className="table-actions">
-                      {company.owner_setup_pending && <button disabled={invitingCnpj === company.cnpj} onClick={() => resendSetupInvitation(company)}>{invitingCnpj === company.cnpj ? "Enviando..." : "Reenviar convite"}</button>}
                       <button onClick={() => handleStatusChange(company)}>{company.status === "suspended" ? "Reativar" : "Suspender"}</button>
                     </td>
                   </tr>
@@ -537,8 +520,29 @@ function Storefront() {
   );
 }
 
+function PasswordChangeForm({ onSubmit, busy, error, required = false }) {
+  return (
+    <section className="login-card">
+      <p className="eyebrow">{required ? "PRIMEIRO ACESSO" : "SEGURANÇA DA CONTA"}</p>
+      <h1>{required ? "Troque sua senha temporária" : "Alterar senha"}</h1>
+      <p>{required
+        ? "Por segurança, defina uma senha pessoal antes de acessar o painel."
+        : "Informe sua senha atual e escolha uma nova senha exclusiva com pelo menos 12 caracteres."}</p>
+      <form className="form-grid" onSubmit={onSubmit}>
+        <label className="span-2">Senha atual<input name="current_password" type="password" required autoComplete="current-password" /></label>
+        <label className="span-2">Nova senha (mínimo 12 caracteres)<input name="new_password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" /></label>
+        <label className="span-2">Confirme a nova senha<input name="confirmation" type="password" required minLength={12} maxLength={128} autoComplete="new-password" /></label>
+        {error && <p className="form-error span-2">{error}</p>}
+        <button className="button primary full span-2" disabled={busy}>
+          {busy ? "Alterando senha..." : "Salvar nova senha"}
+        </button>
+      </form>
+    </section>
+  );
+}
+
 function Admin() {
-  const { user, login: authenticate, logout: endSession } = useAuth();
+  const { user, setUser, login: authenticate, logout: endSession } = useAuth();
   const [tab, setTab] = useState("products");
   const [products, setProducts] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -552,6 +556,7 @@ function Admin() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
+  const [passwordBusy, setPasswordBusy] = useState(false);
 
   const loadAdminData = async () => {
     const [p, o, c, s] = await Promise.all([
@@ -562,6 +567,10 @@ function Admin() {
   useEffect(() => {
     if (user === null) return;
     if (user === false) {
+      setLoading(false);
+      return;
+    }
+    if (user.must_change_password) {
       setLoading(false);
       return;
     }
@@ -576,6 +585,33 @@ function Admin() {
     setLoading(true);
     try { await authenticate(body.cnpj, body.email, body.password); setError(""); }
     catch (failure) { setError(errorText(failure)); setLoading(false); }
+  };
+  const changePassword = async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form).entries());
+    if (values.new_password !== values.confirmation) {
+      setError("As novas senhas não correspondem.");
+      return;
+    }
+    setError("");
+    setPasswordBusy(true);
+    try {
+      await api.post("/auth/change-password", {
+        current_password: values.current_password,
+        new_password: values.new_password,
+      });
+      form.reset();
+      setNotice("Senha alterada com sucesso.");
+      if (user.must_change_password) {
+        setLoading(true);
+        setUser({ ...user, must_change_password: false });
+      }
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setPasswordBusy(false);
+    }
   };
   const saveProduct = async (event) => {
     event.preventDefault();
@@ -725,6 +761,11 @@ function Admin() {
       <a href={siteUrl()} className="back-link">← Voltar para a vitrine</a>
     </form>
   </main>;
+  if (user.must_change_password) return <main className="login-page">
+    <a className="brand" href={siteUrl()}><span className="brand-mark">V</span><span>Vitrine Virtual<small>Painel administrativo</small></span></a>
+    <PasswordChangeForm onSubmit={changePassword} busy={passwordBusy} error={error} required />
+    <button className="logout" onClick={logout}>Sair da conta</button>
+  </main>;
 
   const currentOrder = orders.find((item) => item.id === new URLSearchParams(window.location.search).get("print"));
   if (currentOrder) return <main className="romaneio" id="romaneio">
@@ -741,6 +782,7 @@ function Admin() {
     ["customers", "Clientes", "admin-nav-customers-tab"],
     ["orders", "Pedidos", "admin-nav-orders-tab"],
     ...(user.role === "admin" ? [["users", "Usuários", "admin-nav-users-tab"]] : []),
+    ["password", "Alterar senha", "admin-nav-password-tab"],
     ["settings", "Configurações", "admin-nav-settings-tab"],
   ];
   return <div className="admin-shell">
@@ -755,6 +797,7 @@ function Admin() {
       <section className="admin-content">
         {notice && <div className="notice">{notice}<button onClick={() => setNotice("")}>×</button></div>}
         {error && <div className="notice error-notice">{error}<button onClick={() => setError("")}>×</button></div>}
+        {tab === "password" && <PasswordChangeForm onSubmit={changePassword} busy={passwordBusy} error="" />}
         {tab === "products" && <>
           <div className="admin-heading"><div><p className="eyebrow">CATÁLOGO</p><h1>Produtos</h1><p>Gerencie o catálogo e o estoque da sua vitrine.</p></div>
             <button className="button primary" data-testid="admin-product-add-button" onClick={() => setEditing({})}>+ Novo produto</button></div>
@@ -838,7 +881,6 @@ function Admin() {
 
 export default function App() {
   if (appPath === "/cadastro") return <CompanyRegistration />;
-  if (appPath === "/definir-senha") return <SetCompanyPassword />;
   if (appPath === "/superadmin") return <PlatformAdmin />;
   if (appPath === "/cliente" || appPath.startsWith("/cliente/")) {
     return <CustomerPortal initialMode={appPath === "/cliente/cadastro" ? "register" : "login"} />;

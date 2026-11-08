@@ -27,6 +27,9 @@ export default function CompanyRegistration() {
           cnpj,
           store_name: data.store_name,
           email: data.email,
+          phone: data.phone,
+          legal_name: data.legal_name,
+          business_address: data.business_address,
         },
         { headers: { "X-Setup-Secret": data.setup_secret } },
       );
@@ -57,11 +60,14 @@ export default function CompanyRegistration() {
           <>
             <p className="eyebrow">ACESSO DO PROPRIETÁRIO</p>
             <h1>Cadastrar empresa</h1>
-            <p>Cadastre a empresa. O administrador receberá um convite por e-mail para criar a própria senha.</p>
+            <p>Cadastre os dados de adesão. Uma senha temporária será gerada para o primeiro acesso.</p>
             <label>Código mestre<input name="setup_secret" type="password" required autoComplete="off" /></label>
             <label>CNPJ<input name="cnpj" inputMode="numeric" placeholder="00.000.000/0000-00" required /></label>
             <label>Nome da empresa / loja<input name="store_name" required minLength={2} maxLength={160} /></label>
             <label>E-mail do administrador<input name="email" type="email" required autoComplete="off" /></label>
+            <label>Razão social / titular<input name="legal_name" maxLength={200} /></label>
+            <label>WhatsApp da empresa<input name="phone" maxLength={30} /></label>
+            <label>Endereço comercial<input name="business_address" maxLength={300} /></label>
             {error && <p className="form-error">{error}</p>}
             <button className="button primary full" disabled={loading}>
               {loading ? "Cadastrando empresa..." : "Cadastrar empresa e administrador"}
@@ -71,11 +77,12 @@ export default function CompanyRegistration() {
           <>
             <p className="eyebrow">CADASTRO CONCLUÍDO</p>
             <h1>{company.store_name}</h1>
-            <p>A empresa foi cadastrada e o convite para definir a senha foi enviado ao administrador.</p>
+            <p>Empresa cadastrada. Entregue a senha temporária ao administrador por um canal privado.</p>
             <div className="registration-summary">
               <p><strong>CNPJ:</strong> {company.cnpj}</p>
               <p><strong>Administrador:</strong> {company.email}</p>
-              <p>O link de ativação expira em 24 horas e só pode ser usado uma vez.</p>
+              <p><strong>Senha temporária:</strong> <code>{company.temporary_password}</code></p>
+              <p>O cliente precisará trocar essa senha no primeiro acesso. Esta senha só é exibida nesta tela; guarde-a antes de sair.</p>
             </div>
             <a
               className="button primary full"
