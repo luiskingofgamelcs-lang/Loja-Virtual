@@ -25,8 +25,8 @@ export default function CompanyRegistration() {
         "/platform/companies",
         {
           cnpj,
+          store_name: data.store_name,
           email: data.email,
-          password: data.password,
         },
         { headers: { "X-Setup-Secret": data.setup_secret } },
       );
@@ -57,11 +57,11 @@ export default function CompanyRegistration() {
           <>
             <p className="eyebrow">ACESSO DO PROPRIETÁRIO</p>
             <h1>Cadastrar empresa</h1>
-            <p>Informe o CNPJ e crie o acesso do administrador. Depois, configure os dados da loja no painel.</p>
+            <p>Cadastre a empresa. O administrador receberá um convite por e-mail para criar a própria senha.</p>
             <label>Código mestre<input name="setup_secret" type="password" required autoComplete="off" /></label>
             <label>CNPJ<input name="cnpj" inputMode="numeric" placeholder="00.000.000/0000-00" required /></label>
+            <label>Nome da empresa / loja<input name="store_name" required minLength={2} maxLength={160} /></label>
             <label>E-mail do administrador<input name="email" type="email" required autoComplete="off" /></label>
-            <label>Senha inicial (mínimo 8 caracteres)<input name="password" type="password" required minLength="8" autoComplete="new-password" /></label>
             {error && <p className="form-error">{error}</p>}
             <button className="button primary full" disabled={loading}>
               {loading ? "Cadastrando empresa..." : "Cadastrar empresa e administrador"}
@@ -71,11 +71,11 @@ export default function CompanyRegistration() {
           <>
             <p className="eyebrow">CADASTRO CONCLUÍDO</p>
             <h1>{company.store_name}</h1>
-            <p>A empresa foi cadastrada e seu banco de dados foi provisionado.</p>
+            <p>A empresa foi cadastrada e o convite para definir a senha foi enviado ao administrador.</p>
             <div className="registration-summary">
               <p><strong>CNPJ:</strong> {company.cnpj}</p>
               <p><strong>Administrador:</strong> {company.email}</p>
-              <p>Entregue ao administrador o CNPJ, o e-mail e a senha inicial definidos no cadastro.</p>
+              <p>O link de ativação expira em 24 horas e só pode ser usado uma vez.</p>
             </div>
             <a
               className="button primary full"

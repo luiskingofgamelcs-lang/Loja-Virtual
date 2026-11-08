@@ -3,6 +3,7 @@ import { api, getTenantCnpj, mediaUrl, uploadImage } from "./lib/api.js";
 import { useAuth } from "./context/AuthContext.jsx";
 import { useCart } from "./context/CartContext.jsx";
 import CompanyRegistration from "./pages/CompanyRegistration.jsx";
+import SetCompanyPassword from "./pages/SetCompanyPassword.jsx";
 
 const basePath = import.meta.env.BASE_URL;
 const siteUrl = (path = "") => {
@@ -23,6 +24,8 @@ function PlatformAdmin() {
   const [companies, setCompanies] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [invitingCnpj, setInvitingCnpj] = useState("");
 
   const loadCompanies = async () => {
     const { data } = await api.get("/platform/companies");
@@ -69,6 +72,20 @@ function PlatformAdmin() {
     }
   };
 
+  const resendSetupInvitation = async (company) => {
+    setError("");
+    setNotice("");
+    setInvitingCnpj(company.cnpj);
+    try {
+      await api.post(`/platform/companies/${encodeURIComponent(company.cnpj)}/setup-invitation`);
+      setNotice(`Convite reenviado para ${company.email}.`);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setInvitingCnpj("");
+    }
+  };
+
   if (!loggedIn) {
     return (
       <main className="login-page">
@@ -104,9 +121,10 @@ function PlatformAdmin() {
         <header className="admin-topbar"><span>Empresas cadastradas</span></header>
         <section className="admin-content">
           {error && <div className="notice error-notice">{error}</div>}
+          {notice && <div className="notice">{notice}<button onClick={() => setNotice("")} aria-label="Fechar aviso">×</button></div>}
           <div className="table-wrap">
             <table>
-              <thead><tr><th>CNPJ</th><th>Loja</th><th>E-mail</th><th>Banco</th><th>Status</th><th></th></tr></thead>
+              <thead><tr><th>CNPJ</th><th>Loja</th><th>E-mail</th><th>Banco</th><th>Status</th><th>Acesso</th><th></th></tr></thead>
               <tbody>
                 {companies.map((company) => (
                   <tr key={company.cnpj}>
@@ -115,10 +133,14 @@ function PlatformAdmin() {
                     <td>{company.email}</td>
                     <td>{company.database}</td>
                     <td>{company.status === "suspended" ? "Suspensa" : "Ativa"}</td>
-                    <td className="table-actions"><button onClick={() => handleStatusChange(company)}>{company.status === "suspended" ? "Reativar" : "Suspender"}</button></td>
+                    <td>{company.owner_setup_pending ? "Aguardando definição de senha" : "Ativado"}</td>
+                    <td className="table-actions">
+                      {company.owner_setup_pending && <button disabled={invitingCnpj === company.cnpj} onClick={() => resendSetupInvitation(company)}>{invitingCnpj === company.cnpj ? "Enviando..." : "Reenviar convite"}</button>}
+                      <button onClick={() => handleStatusChange(company)}>{company.status === "suspended" ? "Reativar" : "Suspender"}</button>
+                    </td>
                   </tr>
                 ))}
-                {!companies.length && <tr><td colSpan="6" className="table-empty">Nenhuma empresa cadastrada.</td></tr>}
+                {!companies.length && <tr><td colSpan="7" className="table-empty">Nenhuma empresa cadastrada.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -816,6 +838,7 @@ function Admin() {
 
 export default function App() {
   if (appPath === "/cadastro") return <CompanyRegistration />;
+  if (appPath === "/definir-senha") return <SetCompanyPassword />;
   if (appPath === "/superadmin") return <PlatformAdmin />;
   if (appPath === "/cliente" || appPath.startsWith("/cliente/")) {
     return <CustomerPortal initialMode={appPath === "/cliente/cadastro" ? "register" : "login"} />;

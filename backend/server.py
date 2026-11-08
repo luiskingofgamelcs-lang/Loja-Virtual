@@ -1,13 +1,19 @@
+import asyncio
+import hashlib
 import logging
 import os
 import re
 import secrets
+import smtplib
+import ssl
 import uuid
 from contextvars import ContextVar
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode, urlsplit
 
 import bcrypt
 import jwt
@@ -31,6 +37,13 @@ DB_NAME = os.getenv("DB_NAME", "test_database")
 PLATFORM_SETUP_SECRET = os.getenv("PLATFORM_SETUP_SECRET", "")
 PLATFORM_ADMIN_EMAIL = os.getenv("PLATFORM_ADMIN_EMAIL", "").strip().lower()
 PLATFORM_ADMIN_PASSWORD = os.getenv("PLATFORM_ADMIN_PASSWORD", "")
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
+SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() == "true"
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
@@ -84,6 +97,76 @@ def image_url(file_id: ObjectId) -> str:
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def ensure_email_delivery_configured() -> None:
+    frontend = urlsplit(FRONTEND_URL)
+    local_frontend = (
+        not os.getenv("RENDER")
+        and frontend.hostname in {"localhost", "127.0.0.1"}
+    )
+    secure_frontend = bool(frontend.netloc) and (frontend.scheme == "https" or local_frontend)
+    if (
+        not SMTP_HOST
+        or not SMTP_FROM
+        or bool(SMTP_USERNAME) != bool(SMTP_PASSWORD)
+        or not secure_frontend
+        or frontend.query
+        or frontend.fragment
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Envio seguro de convites e URL HTTPS da loja não estão configurados no servidor",
+        )
+
+
+def new_password_setup_token() -> tuple[str, str]:
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    return token, token_hash
+
+
+async def send_password_setup_email(email: str, store_name: str, cnpj: str, token: str) -> None:
+    ensure_email_delivery_configured()
+    setup_url = f"{FRONTEND_URL}/definir-senha?cnpj={cnpj}#{urlencode({'token': token})}"
+    message = EmailMessage()
+    message["Subject"] = f"Ative o acesso da loja {store_name}"
+    message["From"] = SMTP_FROM
+    message["To"] = email
+    message.set_content(
+        f"Olá,\n\n"
+        f"A loja {store_name} foi cadastrada na Vitrine Virtual. "
+        "Para ativar seu acesso, defina sua senha neste link:\n\n"
+        f"{setup_url}\n\n"
+        "O link pode ser usado uma única vez e expira em 24 horas. "
+        "Se você não esperava este convite, ignore esta mensagem."
+    )
+
+    def deliver() -> None:
+        context = ssl.create_default_context()
+        if SMTP_USE_SSL:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20, context=context) as server:
+                if SMTP_USERNAME:
+                    server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.send_message(message)
+            return
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.ehlo()
+            if SMTP_USERNAME:
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(message)
+
+    try:
+        await asyncio.to_thread(deliver)
+    except (OSError, smtplib.SMTPException):
+        logger.exception("Failed to send password setup invitation for CNPJ %s", cnpj)
+        raise HTTPException(
+            status_code=502,
+            detail="Não foi possível enviar o convite. Confira a configuração de e-mail e tente novamente.",
+        ) from None
 
 
 def public_product(product: dict[str, Any], *, include_internal: bool = False) -> dict[str, Any]:
@@ -157,9 +240,13 @@ class CompanyRegistrationInput(BaseModel):
     store_name: str = Field(default="Vitrine Virtual", min_length=2, max_length=160)
     legal_name: str = Field(default="", max_length=200)
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
     phone: str = Field(default="", max_length=30)
     business_address: str = Field(default="", max_length=300)
+
+
+class PasswordSetupInput(BaseModel):
+    token: str = Field(min_length=32, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
 
     @field_validator("password")
     @classmethod
@@ -403,9 +490,10 @@ async def register_company(data: CompanyRegistrationInput, request: Request):
     setup_secret = request.headers.get("X-Setup-Secret", "")
     if not secrets.compare_digest(setup_secret, PLATFORM_SETUP_SECRET):
         raise HTTPException(status_code=403, detail="Acesso ao cadastro não autorizado")
+    ensure_email_delivery_configured()
 
     cnpj = normalize_cnpj(data.cnpj)
-    email = data.email.strip().lower()
+    email = str(data.email).strip().lower()
     existing = await registry_db.companies.find_one(
         {"$or": [{"cnpj": cnpj}, {"email": email}]}
     )
@@ -421,6 +509,7 @@ async def register_company(data: CompanyRegistrationInput, request: Request):
                 "store_name": data.store_name.strip(),
                 "database": tenant_database_name(cnpj),
                 "status": "active",
+                "owner_setup_pending": True,
                 "created_at": now_utc().isoformat(),
             }
         )
@@ -430,6 +519,7 @@ async def register_company(data: CompanyRegistrationInput, request: Request):
     database_name = tenant_database_name(cnpj)
     store_database = client[database_name]
     admin_id = str(uuid.uuid4())
+    token, token_hash = new_password_setup_token()
     try:
         await store_database.users.insert_one(
             {
@@ -438,8 +528,15 @@ async def register_company(data: CompanyRegistrationInput, request: Request):
                 "username": email,
                 "name": data.store_name.strip(),
                 "role": "admin",
-                "password_hash": bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode(),
+                "setup_pending": True,
                 "created_at": now_utc().isoformat(),
+            }
+        )
+        await store_database.password_setup_tokens.insert_one(
+            {
+                "user_id": admin_id,
+                "token_hash": token_hash,
+                "expires_at": now_utc() + timedelta(hours=24),
             }
         )
         await store_database.settings.update_one(
@@ -455,17 +552,62 @@ async def register_company(data: CompanyRegistrationInput, request: Request):
             },
             upsert=True,
         )
-    except Exception:
-        await store_database.users.delete_one({"_id": admin_id})
-        await registry_db.companies.delete_one({"cnpj": cnpj})
+        await send_password_setup_email(email, data.store_name.strip(), cnpj, token)
+    except Exception as error:
+        try:
+            await store_database.password_setup_tokens.delete_one({"user_id": admin_id})
+            await store_database.users.delete_one({"_id": admin_id})
+            await registry_db.companies.delete_one({"cnpj": cnpj})
+        except Exception:
+            logger.exception("Failed to roll back company setup for CNPJ %s", cnpj)
+        if isinstance(error, HTTPException):
+            raise
         logger.exception("Failed to provision company for CNPJ %s", cnpj)
-        raise HTTPException(status_code=500, detail="Não foi possível concluir o cadastro da empresa")
+        raise HTTPException(status_code=500, detail="Não foi possível concluir o cadastro da empresa") from error
 
     return {
         "cnpj": cnpj,
         "store_name": data.store_name.strip(),
         "email": email,
+        "invitation_sent": True,
     }
+
+
+@api_router.post("/auth/setup-password")
+async def setup_company_password(data: PasswordSetupInput):
+    token_hash = hashlib.sha256(data.token.encode()).hexdigest()
+    invitation = await db.password_setup_tokens.find_one_and_delete(
+        {
+            "token_hash": token_hash,
+            "expires_at": {"$gt": now_utc()},
+        }
+    )
+    if not invitation:
+        raise HTTPException(status_code=400, detail="Link inválido, expirado ou já utilizado")
+
+    password_hash = bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode()
+    updated = await db.users.update_one(
+        {
+            "_id": invitation["user_id"],
+            "role": "admin",
+            "password_hash": {"$exists": False},
+        },
+        {
+            "$set": {
+                "password_hash": password_hash,
+                "setup_completed_at": now_utc().isoformat(),
+            },
+            "$unset": {"setup_pending": ""},
+        },
+    )
+    if not updated.matched_count:
+        raise HTTPException(status_code=400, detail="Este convite já foi concluído")
+
+    await registry_db.companies.update_one(
+        {"cnpj": tenant_cnpj.get()},
+        {"$set": {"owner_setup_pending": False}},
+    )
+    return {"ok": True}
 
 
 @api_router.post("/platform/auth")
@@ -514,10 +656,58 @@ async def list_companies(_: dict[str, Any] = Depends(current_platform_admin)):
             "email": company.get("email", ""),
             "database": company.get("database", ""),
             "status": company.get("status", "active"),
+            "owner_setup_pending": company.get("owner_setup_pending", False),
             "created_at": company.get("created_at", ""),
         }
         for company in companies
     ]
+
+
+@api_router.post("/platform/companies/{cnpj}/setup-invitation")
+async def resend_company_setup_invitation(
+    cnpj: str,
+    _: dict[str, Any] = Depends(current_platform_admin),
+):
+    ensure_email_delivery_configured()
+    normalized = normalize_cnpj(cnpj)
+    company = await registry_db.companies.find_one({"cnpj": normalized})
+    if not company:
+        raise HTTPException(status_code=404, detail="Empresa não encontrada")
+    if company.get("status") == "suspended":
+        raise HTTPException(status_code=409, detail="Reative a empresa antes de reenviar o convite")
+
+    store_database = client[company["database"]]
+    admin = await store_database.users.find_one(
+        {"email": company["email"], "role": "admin"}
+    )
+    if not admin or admin.get("password_hash"):
+        raise HTTPException(status_code=409, detail="O acesso do administrador já foi ativado")
+
+    token, token_hash = new_password_setup_token()
+    await store_database.password_setup_tokens.update_one(
+        {"user_id": admin["_id"]},
+        {
+            "$set": {
+                "token_hash": token_hash,
+                "expires_at": now_utc() + timedelta(hours=24),
+            }
+        },
+        upsert=True,
+    )
+    try:
+        await send_password_setup_email(
+            company["email"],
+            company.get("store_name", "Vitrine Virtual"),
+            normalized,
+            token,
+        )
+    except HTTPException:
+        await store_database.password_setup_tokens.delete_one(
+            {"user_id": admin["_id"], "token_hash": token_hash}
+        )
+        raise
+
+    return {"ok": True}
 
 
 @api_router.patch("/platform/companies/{cnpj}/status")
